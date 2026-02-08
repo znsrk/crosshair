@@ -1,6 +1,6 @@
 # Crosshair Overlay
 
-A lightweight, always-on-top crosshair overlay for Windows that inverts the colors behind it — Minecraft style.
+A lightweight crosshair overlay for Windows that inverts the colors behind it in Minecraft style.
 
 ## Usage
 
