@@ -11,7 +11,39 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crosshair_overlay import CrosshairOverlay
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crosshair_config.json")
+
+def _get_config_dir():
+    """Return a persistent config directory that works for both script and EXE."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        d = os.path.join(appdata, "CrosshairOverlay")
+    else:
+        d = os.path.join(os.path.expanduser("~"), ".crosshair_overlay")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _migrate_old_config():
+    """If a config exists next to the script/exe but not in APPDATA, migrate it."""
+    new_path = os.path.join(_get_config_dir(), "crosshair_config.json")
+    if os.path.exists(new_path):
+        return  # already migrated
+    # Check next to the executable / script
+    if getattr(sys, 'frozen', False):
+        old_dir = os.path.dirname(sys.executable)
+    else:
+        old_dir = os.path.dirname(os.path.abspath(__file__))
+    old_path = os.path.join(old_dir, "crosshair_config.json")
+    if os.path.exists(old_path):
+        try:
+            import shutil
+            shutil.copy2(old_path, new_path)
+        except Exception:
+            pass
+
+
+_migrate_old_config()
+CONFIG_FILE = os.path.join(_get_config_dir(), "crosshair_config.json")
 
 DEFAULT_CONFIG = {
     "size": 15,
@@ -23,11 +55,14 @@ DEFAULT_CONFIG = {
     "color_on_light": [255, 0, 255],
     "luma_threshold": 128,
     "static_color": [0, 255, 0],
-    "offset_x": 1,
-    "offset_y": 1,
+    "offset_x": 0,
+    "offset_y": 0,
     "refresh_ms": 7,
     "opacity": 255,
     "show_in_capture": False,
+    "position_mode": "center",   # "center" = screen center + offset, "manual" = absolute
+    "manual_x": 960,
+    "manual_y": 540,
 }
 
 # ──────────────────────────── Theme ────────────────────────────
@@ -451,6 +486,7 @@ class CrosshairApp:
     def __init__(self):
         self.overlay = CrosshairOverlay()
         self.cfg = load_config()
+        self._loading = True  # guard against auto-save during init
 
         self.root = tk.Tk()
         self.root.title("Crosshair")
@@ -473,6 +509,7 @@ class CrosshairApp:
         self._build_ui()
         self._apply_config()
         self._update_preview()
+        self._loading = False  # init complete, enable auto-save
 
     def _build_ui(self):
         root = self.root
@@ -571,15 +608,50 @@ class CrosshairApp:
         # ── Position section ──
         SectionHeader(card, "Position").pack(fill="x")
 
+        # Position mode selector
+        self.posmode_var = tk.StringVar()
+        self._posmode_seg = SegmentedControl(card, ["center", "manual"],
+                                             self.posmode_var, self._on_posmode_change)
+        self._posmode_seg.pack(padx=12, pady=(6, 2))
+
+        # --- Center mode controls (offset from screen center) ---
+        self._center_frame = tk.Frame(card, bg=BG_CARD)
+        self._center_frame.pack(fill="x")
+
         self.offx_var = tk.IntVar()
-        self._sl_offx = SliderRow(card, "X Offset", -10, 10, self.offx_var,
+        self._sl_offx = SliderRow(self._center_frame, "X Offset", -500, 500, self.offx_var,
                                    lambda v: self._on_any_change())
         self._sl_offx.pack(fill="x")
 
         self.offy_var = tk.IntVar()
-        self._sl_offy = SliderRow(card, "Y Offset", -10, 10, self.offy_var,
+        self._sl_offy = SliderRow(self._center_frame, "Y Offset", -500, 500, self.offy_var,
                                    lambda v: self._on_any_change())
         self._sl_offy.pack(fill="x")
+
+        # --- Manual mode controls (absolute screen coordinates) ---
+        self._manual_frame = tk.Frame(card, bg=BG_CARD)
+        # Not packed yet — shown/hidden by _on_posmode_change
+
+        import ctypes as _ct
+        _sw = _ct.windll.user32.GetSystemMetrics(0)
+        _sh = _ct.windll.user32.GetSystemMetrics(1)
+
+        self.manual_x_var = tk.IntVar()
+        self._sl_manual_x = SliderRow(self._manual_frame, "Screen X", 0, _sw,
+                                       self.manual_x_var, lambda v: self._on_any_change())
+        self._sl_manual_x.pack(fill="x")
+
+        self.manual_y_var = tk.IntVar()
+        self._sl_manual_y = SliderRow(self._manual_frame, "Screen Y", 0, _sh,
+                                       self.manual_y_var, lambda v: self._on_any_change())
+        self._sl_manual_y.pack(fill="x")
+
+        # Pick-from-screen button
+        self._pick_pos_btn = FlatButton(self._manual_frame, text="CLICK TO SET POSITION",
+                                         command=self._pick_screen_pos,
+                                         bg=BG_INPUT, hover_bg=BG_HOVER, fg=FG,
+                                         width=200, height=28)
+        self._pick_pos_btn.pack(padx=12, pady=(4, 4))
 
         # ── Performance section ──
         SectionHeader(card, "Performance").pack(fill="x")
@@ -641,6 +713,10 @@ class CrosshairApp:
         self._cr_dark.set_color(c["color_on_dark"])
         self._cr_light.set_color(c["color_on_light"])
         self._cr_static.set_color(c["static_color"])
+        self._posmode_seg.set(c.get("position_mode", "center"))
+        self._sl_manual_x.set(c.get("manual_x", 960))
+        self._sl_manual_y.set(c.get("manual_y", 540))
+        self._on_posmode_change(c.get("position_mode", "center"))
 
     def _read_ui(self):
         self.cfg["shape"] = self.shape_var.get()
@@ -657,6 +733,9 @@ class CrosshairApp:
         self.cfg["color_on_dark"] = self._cr_dark.get_color()
         self.cfg["color_on_light"] = self._cr_light.get_color()
         self.cfg["static_color"] = self._cr_static.get_color()
+        self.cfg["position_mode"] = self.posmode_var.get()
+        self.cfg["manual_x"] = self.manual_x_var.get()
+        self.cfg["manual_y"] = self.manual_y_var.get()
 
     def _update_preview(self):
         self._read_ui()
@@ -672,11 +751,47 @@ class CrosshairApp:
         self._read_ui()
         self._update_preview()
         self._push()
+        self._auto_save()
 
     def _on_color(self, key, rgb):
         self.cfg[key] = rgb
         self._update_preview()
         self._push()
+        self._auto_save()
+
+    def _on_posmode_change(self, val):
+        if val == "manual":
+            self._center_frame.pack_forget()
+            self._manual_frame.pack(fill="x")
+        else:
+            self._manual_frame.pack_forget()
+            self._center_frame.pack(fill="x")
+        self._on_any_change()
+
+    def _pick_screen_pos(self):
+        """Let the user click anywhere on screen to set crosshair position."""
+        # Create a transparent fullscreen window to capture a click
+        pick_win = tk.Toplevel(self.root)
+        pick_win.attributes("-fullscreen", True)
+        pick_win.attributes("-alpha", 0.01)  # nearly invisible
+        pick_win.attributes("-topmost", True)
+        pick_win.configure(cursor="crosshair", bg="black")
+        pick_win.overrideredirect(True)
+
+        def on_click(e):
+            self.manual_x_var.set(e.x_root)
+            self.manual_y_var.set(e.y_root)
+            self._sl_manual_x.set(e.x_root)
+            self._sl_manual_y.set(e.y_root)
+            pick_win.destroy()
+            self._on_any_change()
+
+        def on_escape(e):
+            pick_win.destroy()
+
+        pick_win.bind("<ButtonRelease-1>", on_click)
+        pick_win.bind("<Escape>", on_escape)
+        pick_win.focus_force()
 
     def _push(self):
         if self.overlay.is_running:
@@ -695,6 +810,9 @@ class CrosshairApp:
                 opacity=self.cfg["opacity"],
                 refresh_ms=self.cfg["refresh_ms"],
                 show_in_capture=self.cfg["show_in_capture"],
+                position_mode=self.cfg["position_mode"],
+                manual_x=self.cfg["manual_x"],
+                manual_y=self.cfg["manual_y"],
             )
 
     def _toggle(self):
@@ -716,6 +834,19 @@ class CrosshairApp:
             self._status_canvas.itemconfig(self._status_dot, fill=SUCCESS)
             self._status_lbl.config(text="ACTIVE", fg=SUCCESS)
 
+    def _auto_save(self):
+        """Debounced auto-save: saves config 500ms after last change."""
+        if self._loading:
+            return
+        if hasattr(self, '_auto_save_id') and self._auto_save_id:
+            self.root.after_cancel(self._auto_save_id)
+        self._auto_save_id = self.root.after(500, self._do_auto_save)
+
+    def _do_auto_save(self):
+        self._read_ui()
+        save_config(self.cfg)
+        self._toast("Auto-saved")
+
     def _save(self):
         self._read_ui()
         save_config(self.cfg)
@@ -726,6 +857,7 @@ class CrosshairApp:
         self._apply_config()
         self._update_preview()
         self._push()
+        save_config(self.cfg)
         self._toast("Reset")
 
     def _toast(self, msg):
@@ -733,6 +865,9 @@ class CrosshairApp:
         self.root.after(2000, lambda: self._toast_lbl.config(text=""))
 
     def _on_close(self):
+        # Final save before exit
+        self._read_ui()
+        save_config(self.cfg)
         if self.overlay.is_running:
             self.overlay.stop()
         self.root.destroy()

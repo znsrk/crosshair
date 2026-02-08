@@ -332,11 +332,14 @@ class CrosshairOverlay:
             "color_on_light": (255, 0, 255),
             "luma_threshold": 128,
             "static_color": (0, 255, 0),
-            "offset_x": 1,
-            "offset_y": 1,
+            "offset_x": 0,
+            "offset_y": 0,
             "refresh_ms": 7,
             "opacity": 255,            # 1-255
             "show_in_capture": False,   # visible in screen recordings
+            "position_mode": "center", # center | manual
+            "manual_x": 960,
+            "manual_y": 540,
         }
 
         # Runtime state filled during _run
@@ -395,9 +398,17 @@ class CrosshairOverlay:
 
         screen_w = user32.GetSystemMetrics(0)
         screen_h = user32.GetSystemMetrics(1)
-        # Anchor center of crosshair at screen center + offset
-        cx = screen_w // 2 + cfg["offset_x"]
-        cy = screen_h // 2 + cfg["offset_y"]
+
+        position_mode = cfg.get("position_mode", "center")
+        if position_mode == "manual":
+            # Absolute screen coordinates — crosshair centered on that point
+            cx = cfg.get("manual_x", screen_w // 2)
+            cy = cfg.get("manual_y", screen_h // 2)
+        else:
+            # Center of screen + offset
+            cx = screen_w // 2 + cfg["offset_x"]
+            cy = screen_h // 2 + cfg["offset_y"]
+
         wx = cx - sz // 2
         wy = cy - sz // 2
 
